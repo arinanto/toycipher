@@ -2,6 +2,41 @@
 
 <!-- version list -->
 
+## v1.0.0-rc.1 (2026-11-18)
+
+### Build System
+
+- **release**: Bump breaking changes on 0.x to 1.0.0
+  ([#1](https://github.com/arinanto/toycipher/pull/1),
+  [`3af29cf`](https://github.com/arinanto/toycipher/commit/3af29cfe2a7b1d80a79d93d784810416c120dccd))
+
+### Chores
+
+- **lock**: Sync uv.lock with 0.1.0-rc.5 ([#1](https://github.com/arinanto/toycipher/pull/1),
+  [`3af29cf`](https://github.com/arinanto/toycipher/commit/3af29cfe2a7b1d80a79d93d784810416c120dccd))
+
+### Continuous Integration
+
+- **test**: Run pytest as a PR status check ([#1](https://github.com/arinanto/toycipher/pull/1),
+  [`3af29cf`](https://github.com/arinanto/toycipher/commit/3af29cfe2a7b1d80a79d93d784810416c120dccd))
+
+### Documentation
+
+- **readme**: Document the v2 KMAC256 key expansion
+  ([#1](https://github.com/arinanto/toycipher/pull/1),
+  [`3af29cf`](https://github.com/arinanto/toycipher/commit/3af29cfe2a7b1d80a79d93d784810416c120dccd))
+
+### Features
+
+- **kdf**: Derive cascade material with KMAC256 and bump the format to v2
+  ([#1](https://github.com/arinanto/toycipher/pull/1),
+  [`3af29cf`](https://github.com/arinanto/toycipher/commit/3af29cfe2a7b1d80a79d93d784810416c120dccd))
+
+- **kdf**: KMAC256 key expansion and v2 file format
+  ([#1](https://github.com/arinanto/toycipher/pull/1),
+  [`3af29cf`](https://github.com/arinanto/toycipher/commit/3af29cfe2a7b1d80a79d93d784810416c120dccd))
+
+
 ## v0.1.0-rc.5 (2026-11-18)
 
 ### Bug Fixes

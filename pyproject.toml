@@ -36,6 +36,31 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
 
+[tool.semantic_release]
+# Releases are cut by .github/workflows/release.yml, not by hand.
+version_toml = ["pyproject.toml:project.version"]
+tag_format = "v{version}"
+commit_message = "chore(release): {version}"
+signoff_commit = true  # every commit in this repo needs a DCO trailer
+# Stay on 0.x until 1.0.0 is a deliberate decision. v10 defaults to
+# allow_zero_version = false, which forces the first release to 1.0.0-rc.1.
+allow_zero_version = true
+major_on_zero = false  # a breaking change on 0.x bumps the minor digit, not to 1.0.0
+
+[tool.semantic_release.branches.main]
+match = "main"
+# The workflow passes --as-prerelease on every push, so the automatic path is
+# always an rc. A GA release is a manual dispatch that omits the flag, which
+# finalises the latest rc instead of starting a new one. --as-prerelease is a
+# one-way switch, hence `false` here rather than `true`.
+prerelease = false
+prerelease_token = "rc"
+
+[tool.semantic_release.publish]
+# The workflow builds into dist/ and attaches whatever it finds there.
+dist_glob_patterns = ["dist/*"]
+upload_to_vcs_release = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

@@ -1,0 +1,168 @@
+# Copyright (C) 2026 Rinaldi Widianto
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# Release pipeline: Python Semantic Release decides the next version from the
+# commit messages, builds a PyInstaller binary per platform, and attaches the
+# binaries to the GitHub release.
+#
+# Every push to main cuts a *prerelease* (`--as-prerelease`, so v0.2.0-rc.1).
+# A GA release is a manual run of this workflow with kind=ga: the flag is then
+# omitted and PSR finalises the newest rc instead of starting another one
+# (v0.2.0-rc.2 -> v0.2.0). Nothing else in the pipeline differs.
+#
+# The binaries are unsigned. macOS quarantines a downloaded arm64 executable,
+# which needs `xattr -d com.apple.quarantine toycipher` before it will run.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "prerelease cuts a new rc, ga promotes the newest rc to a final release"
+        type: choice
+        options: [prerelease, ga]
+        default: prerelease
+
+permissions:
+  contents: write
+
+# Two releases must never overlap: each one bumps the version, commits, and
+# pushes a tag. Queued rather than cancelled, so a release is never half done.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.psr.outputs.released }}
+      tag: ${{ steps.psr.outputs.tag }}
+      version: ${{ steps.psr.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0 # PSR needs the whole tag history to pick a version
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # `version` bumps pyproject.toml and CHANGELOG.md, commits, tags, pushes,
+      # and creates the GitHub release with the generated notes. It has to be
+      # this step that creates the release: `semantic-release publish` can only
+      # upload to a release that already exists.
+      - id: psr
+        uses: python-semantic-release/python-semantic-release@v10.7.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          git_committer_name: github-actions[bot]
+          git_committer_email: 41898282+github-actions[bot]@users.noreply.github.com
+          # push and dispatch(kind=prerelease) -> rc; dispatch(kind=ga) -> final
+          prerelease: ${{ github.event_name == 'push' || inputs.kind == 'prerelease' }}
+          build: false # the binaries are built per platform in the next job
+
+  build:
+    name: build (${{ matrix.platform }})
+    needs: version
+    if: needs.version.outputs.released == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true # a missing platform is a broken release, not a partial one
+      matrix:
+        include:
+          # Current GA images. The runner's glibc does not leak into the artifact:
+          # PyInstaller's bootloader ships prebuilt in a manylinux2014 wheel and
+          # libpython comes from python-build-standalone, so the binary's floor
+          # stays GLIBC_2.17 whatever Ubuntu we build on.
+          - { os: ubuntu-24.04, platform: linux-amd64, arch: amd64, ext: "" }
+          - { os: ubuntu-24.04-arm, platform: linux-aarch64, arch: aarch64, ext: "" }
+          - { os: macos-26, platform: macos-aarch64, arch: aarch64, ext: "" }
+          - { os: windows-2025, platform: windows-amd64, arch: amd64, ext: ".exe" }
+          # windows-aarch64 is deliberately absent: the runner (`windows-11-arm`)
+          # is available, but `cryptography` publishes no win_arm64 wheel
+          # (dropped in 46.0.4, not back as of 50.0.2), so `uv sync` has to build
+          # it from source, which needs Rust, Perl and OpenSSL on the runner.
+          # Add the entry back once a win_arm64 wheel ships:
+          # - { os: windows-11-arm, platform: windows-aarch64, arch: aarch64, ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          fetch-depth: 1
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # --no-install-project: toycipher.spec points PyInstaller at src/ via
+      # pathex, so the package does not need to be pip-installed, and skipping
+      # it keeps the stale uv.lock version out of the way of the bumped
+      # pyproject.toml version.
+      - name: Install dependencies
+        run: uv sync --frozen --no-install-project
+
+      - name: Build
+        run: uv run --no-sync pyinstaller toycipher.spec
+
+      # Guards the artifact name: a mislabelled runner would otherwise ship an
+      # amd64 binary as aarch64 and nobody would notice.
+      - name: Verify runner architecture
+        shell: bash
+        run: |
+          uv run --no-sync python -c 'import platform,sys; m=platform.machine().lower(); want="${{ matrix.arch }}"; sys.exit(0 if {"x86_64":"amd64","amd64":"amd64","aarch64":"aarch64","arm64":"aarch64"}.get(m)==want else f"runner is {m}, artifact is {want}")'
+
+      - name: Smoke test
+        shell: bash
+        run: ./dist/toycipher${{ matrix.ext }} --help
+
+      - name: Name the artifact
+        shell: bash
+        run: mv "dist/toycipher${{ matrix.ext }}" "dist/toycipher-${{ needs.version.outputs.version }}-${{ matrix.platform }}${{ matrix.ext }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/toycipher-*
+          if-no-files-found: error
+
+  publish:
+    name: attach binaries
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: astral-sh/setup-uv@v10
+
+      # PSR is release tooling, not a project dependency: run the pinned version
+      # through uvx on its own interpreter instead of adding it to the lockfile.
+      # Re-running this step for an existing tag fails on already-uploaded asset
+      # names; delete those assets first.
+      - name: Upload binaries to the release
+        run: uvx --python 3.12 --from "python-semantic-release==10.7.0" semantic-release -v publish --tag "$TAG"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+
+      # `publish` only warns when the release is missing, so a green run with an
+      # empty release page is possible without this check.
+      - name: Check the assets landed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          expected=$(ls -1 dist | wc -l)
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort
+          attached=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          [ "$attached" -eq "$expected" ] || { echo "::error::$attached of $expected assets attached to $TAG"; exit 1; }

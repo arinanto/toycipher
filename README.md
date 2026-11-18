@@ -100,6 +100,36 @@ but not all — with one that does not, the build stops at
 (`uv python pin`) and re-create the venv. `toycipher.spec` is tracked even though `*.spec`
 is in `.gitignore`, because a hand-maintained spec is source, not generated output.
 
+## Releases
+
+Releases are cut by [Python Semantic Release](https://python-semantic-release.readthedocs.io/)
+from the commit messages on `main`, driven by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+Nothing is published by hand.
+
+Every push to `main` cuts a **prerelease**: the version is derived from the commits since
+the last tag and gets an `rc` suffix (`v0.2.0-rc.1`, then `v0.2.0-rc.2`, …). Each release
+carries a PyInstaller binary per platform, built in the same run and attached to the
+release page:
+
+| Artifact | Runner |
+| --- | --- |
+| `toycipher-<version>-linux-amd64` | `ubuntu-24.04` |
+| `toycipher-<version>-linux-aarch64` | `ubuntu-24.04-arm` |
+| `toycipher-<version>-macos-aarch64` | `macos-26` |
+| `toycipher-<version>-windows-amd64.exe` | `windows-2025` |
+
+There is no `windows-aarch64` build: `cryptography` publishes no `win_arm64` wheel, so the
+dependency cannot be installed on the ARM runner. Add the commented-out matrix entry back
+when a wheel ships.
+
+To turn the newest prerelease into a final release, run the `release` workflow manually
+(*Actions → release → Run workflow*) with `kind: ga`. It finalises `v0.2.0-rc.2` as
+`v0.2.0` rather than starting another `rc`, and the GitHub release is marked as a normal
+release instead of a prerelease. No merge or branch is involved.
+
+The binaries are unsigned. macOS quarantines a downloaded arm64 executable, so the first
+run needs `xattr -d com.apple.quarantine toycipher`.
+
 ## Usage
 
 The operation is an explicit subcommand. It is never inferred from the filename — a file

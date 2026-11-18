@@ -6,7 +6,7 @@
 Every input is a transparent sequence -- ``bytes(range(...))``, ``0x10``-style
 counters, or the ASCII string "0123..." -- and no test touches ``os.urandom``.
 Every expected value is a hard-coded constant, so a mismatch means the on-disk
-format, the HKDF labels, the cascade order, the padding or the KDF parameters
+format, the KMAC256 KDF labels, the cascade order, the padding or the KDF parameters
 changed, not that the machine got unlucky.
 
 Run with:  uv run pytest
@@ -28,44 +28,44 @@ PLAINTEXT = b"0123456789abcdef0123456789abcdef"  # 32 ASCII bytes
 HEADER_SIZE = A.HEADER_SIZE
 
 # --- known answers, captured once and pinned here -------------------------
-# Argon2id(time_cost=3, memory_cost=65536, parallelism=4, hash_len=48) over PASSWORD/SALT.
-MASTER_KEY_HEX = "2f27df30a156a1cd7cb0e71b96f3a6c0e1bfeca855b452bce08b05a1706e942fc50acd01ed58ff686f06d2f35266bc7d"
-# HKDF-SHA-512 expansion of MASTER_KEY_HEX under MASTER_IV.
+# Argon2id(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32) over PASSWORD/SALT.
+MASTER_KEY_HEX = "7fc91051dad9212ac204f6ed76c498cac5d5e0c27a623b3cd359bb9d59ac3507"
+# KMAC256 expansion of MASTER_KEY_HEX with MASTER_IV as the message.
 KEY_MATERIAL = {
-    "k_sm4": "577c90be8aba6ecb519e35f4d8dcaf05",
-    "k_camellia": "698d3258f546b3491b4fd7b134d98c6b",
-    "k_aes": "94ba021f19c5becd276c48fbae1d58a9",
-    "k_mac": "adf426b8a72dfde787d4bf2ef543652b10490ad263b0d4161a1e52e77ca14ddb",
-    "iv_sm4": "de16cb8b7dcbd320630a79610d94117d",
-    "iv_camellia": "239d2eec3ac82ff78a8ed707eb8c1745",
-    "iv_aes": "0a8678637f877cfb8b41aeadb86f72da",
+    "k_sm4": "fb66b17d3a98afbf82ae2e8e3b366b99",
+    "k_camellia": "4b59ecff9fc1c5e435994c35c77e60be",
+    "k_aes": "44c827efa599a65100b5bdddf89eb68c",
+    "k_mac": "5ec2791a74419769755fabc6363b0c4b5a7e7bf3061e8a6e15f175ef18196078",
+    "iv_sm4": "06ca78e4cbf656b7811203c51d8b6744",
+    "iv_camellia": "b3c3dbfe59389f91366f020f4ceea047",
+    "iv_aes": "5c78c3b96f61db768ff7adfe2cd0f778",
 }
-# Whole encrypted file for PLAINTEXT: MAGIC || version(1) || length(0x70) || SALT ||
+# Whole encrypted file for PLAINTEXT: MAGIC || version(2) || length(0x70) || SALT ||
 # MASTER_IV || 48-byte ciphertext (32 bytes plaintext + one PKCS#7 block) || 32-byte
 # KMAC256 tag. The length counts salt+master_iv+ciphertext+tag = 112 = 0x70 bytes.
 FILE_VECTOR_32 = bytes.fromhex(
     "8941525443595054"  # MAGIC b"\x89ARTCYPT"
-    "00000001"  # version 1, big-endian
+    "00000002"  # version 2, big-endian
     "0000000000000070"  # length 112, big-endian
     "000102030405060708090a0b0c0d0e0f"  # SALT
     "101112131415161718191a1b1c1d1e1f"  # MASTER_IV
-    "296d27de966f2cd0b7c337e8ecf223e8"  # ciphertext block 1
-    "d4666552ae4a925bfe3eebfe9c3b0be5"  # ciphertext block 2
-    "640c7d54989a15f42c1310ab130a181c"  # ciphertext block 3 (padding)
-    "c12abb5a9390081eabab6583ce012e2c"  # KMAC256 tag
-    "213df38c3f0410e0968d86079ff2ed69"
+    "2db75a3fe731b9656d06fcfb559ccaaa"  # ciphertext block 1
+    "607442713ce40b63cab747bfef3bbf0c"  # ciphertext block 2
+    "afb51245efd281f5caecb1115b240b08"  # ciphertext block 3 (padding)
+    "7fe54324efd495223872bd19bc7c2770"  # KMAC256 tag
+    "d2c1dd82e7d9937641fa507f3daf25e2"
 )
 # Whole encrypted file for the empty plaintext (one all-0x10 padding block).
 # The length counts salt+master_iv+ciphertext+tag = 80 = 0x50 bytes.
 FILE_VECTOR_EMPTY = bytes.fromhex(
     "8941525443595054"
-    "00000001"
+    "00000002"
     "0000000000000050"
     "000102030405060708090a0b0c0d0e0f"
     "101112131415161718191a1b1c1d1e1f"
-    "5ed7a79fead379a8cddb4c91bd483f31"
-    "1f2dd0bb25670fbb7a0ea67ef8533a02"
-    "e1cd766515b74413115ae48a206a3b6b"
+    "e78ef5401c6870179eb85b16a55956f9"
+    "854714f067e87fe692697459dce738c5"
+    "8762f119fb3a1e087178c3b39d07a957"
 )
 
 
@@ -75,7 +75,7 @@ def padded_len(n: int) -> int:
 
 
 def with_length(body: bytes) -> bytes:
-    """A complete file: magic, version 1 and a length field that matches `body`."""
+    """A complete file: magic, the current format version and a matching length field."""
     header = A.MAGIC + A.VERSION.to_bytes(A.VERSION_SIZE, "big") + len(body).to_bytes(A.LENGTH_SIZE, "big")
     return header + body
 
@@ -119,7 +119,7 @@ def test_argon2id_master_key() -> None:
     assert A.derive_master_key(PASSWORD, SALT).hex() == MASTER_KEY_HEX
 
 
-def test_hkdf_key_material() -> None:
+def test_kmac_key_material() -> None:
     mat = A.expand_cascade_material(bytes.fromhex(MASTER_KEY_HEX), MASTER_IV)
     assert {k: v.hex() for k, v in mat.items()} == KEY_MATERIAL
 
@@ -209,7 +209,7 @@ def test_old_format_without_version_field(harness: Harness) -> None:
     harness.rejects(old_blob, "Unsupported format version")
 
 
-@pytest.mark.parametrize("version", [0, 2, 3, 0xFFFFFFFF])
+@pytest.mark.parametrize("version", [0, 1, 3, 0xFFFFFFFF])
 def test_unsupported_version(harness: Harness, version: int) -> None:
     blob = bytearray(FILE_VECTOR_32)
     blob[len(A.MAGIC) : A.LENGTH_OFFSET] = version.to_bytes(A.VERSION_SIZE, "big")

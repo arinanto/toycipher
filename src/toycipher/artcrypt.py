@@ -11,9 +11,8 @@ import pwinput
 from argon2.low_level import Type, hash_secret_raw
 from Crypto.Hash import KMAC256
 from cryptography.hazmat.decrepit.ciphers.algorithms import Camellia
-from cryptography.hazmat.primitives import hashes, padding
+from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 # On-disk layout:
 #   MAGIC(8) || version(4) || length(8) || salt(16) || master_iv(16) || ciphertext || tag(32)
@@ -21,7 +20,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # covers salt, master_iv, ciphertext and tag. Ciphertext is PKCS#7-padded once, so its
 # length is always a multiple of BLOCK_SIZE.
 MAGIC = b"\x89ARTCYPT"  # 8-byte file signature, written first and checked first
-VERSION = 1  # format version; the only value this build writes and accepts
+VERSION = 2  # format version; the only value this build writes and accepts
 VERSION_SIZE = 4  # big-endian uint32 version field
 LENGTH_SIZE = 8  # big-endian uint64 byte count of everything after this field
 LENGTH_OFFSET = len(MAGIC) + VERSION_SIZE  # start of the length field
@@ -33,6 +32,9 @@ IV_SIZE = 16  # 128-bit Master IV
 TAG_SIZE = 32  # 256-bit KMAC256 authentication tag
 HEADER_SIZE = BODY_OFFSET + SALT_SIZE + IV_SIZE  # 52 bytes: ciphertext starts here
 EXT = ".artcrypt"
+
+KDF_CUSTOMIZATION = b"ARTCRYPT_V2_EXPAND_SM4CBC_CAMELLIA128CBC_AES128CBC_KMAC256_MATS"
+AUTH_TAG_CUSTOMIZATION = b"ARTCRYPT_V2_CASCADE_AUTH_TAG"
 
 
 def _read_chunk(fin: BinaryIO, size: int) -> bytes:
@@ -51,42 +53,32 @@ def _read_chunk(fin: BinaryIO, size: int) -> bytes:
 
 
 def derive_master_key(password: str, salt: bytes) -> bytes:
-    """Stretches a password into a 384-bit (48-byte) master key using Argon2id."""
+    """Stretches a password into a 256-bit (32-byte) master key using Argon2id."""
     return hash_secret_raw(
         secret=password.encode("utf-8"),
         salt=salt,
         time_cost=3,
         memory_cost=65536,
         parallelism=4,
-        hash_len=48,
+        hash_len=32,
         type=Type.ID,
     )
 
 
 def expand_cascade_material(master_key: bytes, master_iv: bytes) -> dict[str, bytes]:
-    """Expands the 384-bit master key and 128-bit IV using HKDF-SHA-512 (>=384-bit security)."""
-    key_material = HKDF(
-        algorithm=hashes.SHA512(),
-        length=80,
-        salt=master_iv,
-        info=b"SM4CBC_CAMELLIA128CBC_AES128CBC_KMAC256_KEYS",
-    ).derive(master_key)
-
-    iv_material = HKDF(
-        algorithm=hashes.SHA512(),
-        length=48,
-        salt=master_key,
-        info=b"SM4CBC_CAMELLIA128CBC_AES128CBC_KMAC256_IVS",
-    ).derive(master_iv)
+    """Expands the 1024-bit key and IV materials (artcrypt is currently targetting 256-bit level security)."""
+    kmac_kdf = KMAC256.new(key=master_key, mac_len=128, custom=KDF_CUSTOMIZATION)
+    kmac_kdf.update(master_iv)
+    derived_materials = kmac_kdf.digest()
 
     return {
-        "k_sm4": key_material[0:16],
-        "k_camellia": key_material[16:32],
-        "k_aes": key_material[32:48],
-        "k_mac": key_material[48:80],
-        "iv_sm4": iv_material[0:16],
-        "iv_camellia": iv_material[16:32],
-        "iv_aes": iv_material[32:48],
+        "k_sm4": derived_materials[0:16],
+        "k_camellia": derived_materials[16:32],
+        "k_aes": derived_materials[32:48],
+        "k_mac": derived_materials[48:80],
+        "iv_sm4": derived_materials[80:96],
+        "iv_camellia": derived_materials[96:112],
+        "iv_aes": derived_materials[112:128],
     }
 
 
@@ -119,7 +111,7 @@ def encrypt_file(
     enc_cam = Cipher(Camellia(mat["k_camellia"]), modes.CBC(mat["iv_camellia"])).encryptor()
     enc_aes = Cipher(algorithms.AES(mat["k_aes"]), modes.CBC(mat["iv_aes"])).encryptor()
 
-    mac = KMAC256.new(key=mat["k_mac"], mac_len=TAG_SIZE, custom=b"CASCADE_AUTH_TAG")
+    mac = KMAC256.new(key=mat["k_mac"], mac_len=TAG_SIZE, custom=AUTH_TAG_CUSTOMIZATION)
     mac.update(salt)
     mac.update(master_iv)
 
@@ -201,7 +193,7 @@ def decrypt_file(input_path: str, output_path: str, password: str) -> None:
         master_key = derive_master_key(password, salt)
         mat = expand_cascade_material(master_key, master_iv)
 
-        mac = KMAC256.new(key=mat["k_mac"], mac_len=TAG_SIZE, custom=b"CASCADE_AUTH_TAG")
+        mac = KMAC256.new(key=mat["k_mac"], mac_len=TAG_SIZE, custom=AUTH_TAG_CUSTOMIZATION)
         mac.update(salt)
         mac.update(master_iv)
 

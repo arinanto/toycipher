@@ -366,7 +366,7 @@ wheels = [
 
 [[package]]
 name = "toycipher"
-version = "0.1.0"
+version = "0.1.0rc5"
 source = { editable = "." }
 dependencies = [
     { name = "argon2-cffi" },

@@ -42,10 +42,12 @@ version_toml = ["pyproject.toml:project.version"]
 tag_format = "v{version}"
 commit_message = "chore(release): {version}"
 signoff_commit = true  # every commit in this repo needs a DCO trailer
-# Stay on 0.x until 1.0.0 is a deliberate decision. v10 defaults to
-# allow_zero_version = false, which forces the first release to 1.0.0-rc.1.
+# Stay on 0.x only until a breaking change earns 1.0.0: with
+# major_on_zero = true a breaking change on 0.x bumps to 1.0.0 (here the v2
+# on-disk format), while fix/feat releases stay on 0.x. v10 defaults
+# allow_zero_version to false, which would jump to 1.0.0 regardless of level.
 allow_zero_version = true
-major_on_zero = false  # a breaking change on 0.x bumps the minor digit, not to 1.0.0
+major_on_zero = true  # a breaking change on 0.x bumps to 1.0.0, not 0.2.0
 
 [tool.semantic_release.branches.main]
 match = "main"

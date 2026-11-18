@@ -1,0 +1,55 @@
+# Copyright (C) 2026 Rinaldi Widianto
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# Status check: run the test suite on every pull request. The trigger is
+# `pull_request` rather than a branch push because it checks out the merge ref
+# (refs/pull/N/merge), so a green run means the tree that will actually land on
+# main passed -- not a branch tip that may be behind it. It also covers PRs from
+# forks, where a push in this repository never fires, and it avoids a second run
+# per push for branches that already have a PR open.
+#
+# Direct pushes to main are blocked by branch protection, so every change
+# reaches main through a PR and therefore through this check. A tag push does
+# not match a pull_request event, so PSR's release tags start no test run.
+
+name: test
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A follow-up push to the same PR makes the previous run irrelevant, so cancel
+# it rather than paying for a result nobody will read. github.ref is the PR's
+# merge ref (refs/pull/N/merge), which is stable for the life of the PR.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same pinned action as release.yml: setup-uv stopped publishing moving
+      # major tags after v7, so `@v10` does not resolve. The interpreter is
+      # uv's job: .python-version pins 3.15 and uv fetches it on first sync.
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      # --no-install-project for the same reason as the release build: tests
+      # import toycipher through [tool.pytest.ini_options] pythonpath = ["src"],
+      # so the package need not be installed and a stale uv.lock version cannot
+      # block the run. --frozen still fails the check if the lock file and
+      # pyproject.toml disagree about dependencies.
+      - name: Install dependencies
+        run: uv sync --frozen --no-install-project
+
+      # --no-sync: the previous step already resolved the environment, so this
+      # must not quietly re-resolve it.
+      - name: Run tests
+        run: uv run --no-sync pytest

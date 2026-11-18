@@ -26,15 +26,17 @@ Integrity is separate: an encrypt-then-MAC KMAC256 tag covers the whole cipherte
 
 | Step | What | Parameters |
 | --- | --- | --- |
-| 1 | Argon2id stretches the password | `t=3`, `m=64 MiB`, `p=4`, 48-byte output |
-| 2 | HKDF-SHA-512 derives per-purpose material | `k_sm4`, `k_camellia`, `k_aes` (128-bit), `k_mac` (256-bit), `iv_sm4`, `iv_camellia`, `iv_aes` (128-bit) |
+| 1 | Argon2id stretches the password | `t=3`, `m=64 MiB`, `p=4`, 32-byte output |
+| 2 | KMAC256 expands it into 128 bytes of material | `k_sm4`, `k_camellia`, `k_aes` (128-bit), `k_mac` (256-bit), `iv_sm4`, `iv_camellia`, `iv_aes` (128-bit), from one 1024-bit expansion with `master_iv` as the message |
 | 3 | PKCS#7 pads the plaintext **once** | 128-bit blocks; all three ciphers share the 16-byte block size, so no layer needs its own padding |
 | 4 | Then the cascade runs | `SM4-CBC → Camellia-CBC → AES-CBC` |
-| 5 | KMAC256 authenticates | `KMAC256(k_mac, 256-bit, custom="CASCADE_AUTH_TAG")` over `salt ‖ master_iv ‖ ciphertext` |
+| 5 | KMAC256 authenticates | `KMAC256(k_mac, 256-bit, custom="ARTCRYPT_V2_CASCADE_AUTH_TAG")` over `salt ‖ master_iv ‖ ciphertext` |
 
-The master key comes from the password and a random 16-byte salt; the three IVs come from
-HKDF keyed by that master key and a random 16-byte `master_iv`. Both random values are
-stored in the header, so each file is independently keyed even with the same password.
+The master key comes from the password and a random 16-byte salt; the per-layer keys and
+IVs, plus `k_mac`, come from one KMAC256 expansion keyed by that master key, with a random
+16-byte `master_iv` as the message. The expansion is 1024 bits wide, but its strength is
+capped at 256 bits by the master key. Both random values are stored in the header, so each
+file is independently keyed even with the same password.
 
 Encryption is a single streaming pass over the input. Decryption is two passes over the
 ciphertext: first the tag is verified (nothing is written), then the file is re-read and
@@ -45,10 +47,10 @@ decrypted. **Plaintext is never written for a file that fails authentication.**
 ```
 offset  size         field
 0       8            magic        89 41 52 54 43 59 50 54  ("\x89ARTCYPT")
-8       4            version      big-endian uint32, currently 1
+8       4            version      big-endian uint32, currently 2
 12      8            length       big-endian uint64, bytes after this field
 20      16           salt         Argon2id salt
-36      16           master_iv    HKDF salt for the per-layer IVs
+36      16           master_iv    message for the KMAC256 key/IV expansion
 52      n * 16       ciphertext   PKCS#7-padded plaintext, SM4-CBC -> Camellia-CBC -> AES-CBC
 -32     32           tag          KMAC256 over salt || master_iv || ciphertext
 ```
@@ -63,7 +65,7 @@ general. It is written from the real byte count once the body is complete, so it
 agrees with the file size even though encryption is a single streaming pass.
 
 The three cheapest checks run first, in this order, and each one bails out on its own:
-magic, version (only `1` is accepted), then `length` against the actual file size. All of
+magic, version (only `2` is accepted), then `length` against the actual file size. All of
 them happen before Argon2id, before any crypto and before any output file is created, so a
 wrong file, a truncated file, a file with extra bytes, or a format from a future version
 costs milliseconds instead of 64 MiB and three passes. The salt and `master_iv` are
@@ -71,11 +73,12 @@ authenticated by the tag; the version and length are not covered by it, but both
 self-validating — only one version is accepted, and only one length matches a given file
 size — so tampering with either is rejected by the cheap checks.
 
-**Breaking change:** the version and length fields were added in format version 1. Files
-written by builds before that change have no version field, so their first four salt bytes
-are read as a version and they are rejected with `Unsupported format version …` rather
-than a misleading authentication failure. Decrypt them with an older build and re-encrypt
-with this one.
+**Breaking changes:** format version 1 added the version and length fields; version 2
+replaced HKDF-SHA-512 with a KMAC256 expansion and shrank the Argon2id output from 48 to
+32 bytes, so the derived keys and IVs differ. Files written before version 1 have no
+version field, so their first four salt bytes are read as a version; version-1 files carry
+`1` there. Both are rejected with `Unsupported format version …` rather than a misleading
+authentication failure. Decrypt them with an older build and re-encrypt with this one.
 
 ## Install
 
@@ -184,8 +187,9 @@ uv run pytest              # test suite
 The suite is deterministic: every input is a transparent sequence (`bytes(range(16))`,
 `"0123..."`) and every expected value is a hard-coded constant, so a failure means the
 format or the derivation changed rather than that the machine got unlucky.
-`tests/test_artcrypt.py` pins the Argon2id master key, all seven HKDF outputs, and two
-complete encrypted files (a 32-byte plaintext and the empty plaintext) in both directions.
+`tests/test_artcrypt.py` pins the Argon2id master key, all seven KMAC256-derived values,
+and two complete encrypted files (a 32-byte plaintext and the empty plaintext) in both
+directions.
 `tests/test_cli.py` covers the subcommand behaviour and the file-naming rules. Expect
 ~20 seconds — the Argon2id parameters are deliberately not weakened for tests.
 
@@ -196,6 +200,8 @@ What is done deliberately:
 - **Encrypt-then-MAC**, verified before any decryption output is written.
 - The tag covers the salt and `master_iv`, not just the ciphertext, so header tampering
   is detected too.
+- **Domain separation.** The key expansion and the tag use distinct KMAC256 `custom`
+  strings, so the two uses cannot be confused with each other.
 - Fresh salt and `master_iv` per encryption, so identical plaintexts never collide.
 - PKCS#7 is applied exactly once, before the first layer. Intermediate padding would leak
   length structure and grow the file at every layer.

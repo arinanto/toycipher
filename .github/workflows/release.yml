@@ -116,9 +116,20 @@ jobs:
         run: |
           uv run --no-sync python -c 'import platform,sys; m=platform.machine().lower(); want="${{ matrix.arch }}"; sys.exit(0 if {"x86_64":"amd64","amd64":"amd64","aarch64":"aarch64","arm64":"aarch64"}.get(m)==want else f"runner is {m}, artifact is {want}")'
 
+      # `--help` only proves the interpreter starts and the imports resolve;
+      # pycryptodome's raw SM4/Camellia/AES modules are loaded by name at first
+      # use, so a round trip is what actually proves the crypto got bundled.
       - name: Smoke test
         shell: bash
-        run: ./dist/toycipher${{ matrix.ext }} --help
+        env:
+          ARTCRYPT_PASSWORD: smoke-test-only
+        run: |
+          ./dist/toycipher${{ matrix.ext }} --help
+          work=$(mktemp -d)
+          printf 'smoke test\n' > "$work/plain.txt"
+          ./dist/toycipher${{ matrix.ext }} encrypt "$work/plain.txt" -o "$work/cipher.artcrypt"
+          ./dist/toycipher${{ matrix.ext }} decrypt "$work/cipher.artcrypt" -o "$work/plain.out"
+          cmp "$work/plain.txt" "$work/plain.out"
 
       - name: Name the artifact
         shell: bash

@@ -56,11 +56,6 @@ match = "main"
 prerelease = false
 prerelease_token = "rc"
 
-[tool.semantic_release.publish]
-# The workflow builds into dist/ and attaches whatever it finds there.
-dist_glob_patterns = ["dist/*"]
-upload_to_vcs_release = true
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

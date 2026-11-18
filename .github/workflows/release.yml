@@ -154,7 +154,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.tag }}
-          fetch-depth: 0
+          # No history needed: this job only attaches the downloaded artifacts to
+          # the release the version job already created.
+          fetch-depth: 1
 
       # A run where every platform failed has no artifacts at all, which the
       # action treats as an error rather than an empty download.
@@ -175,22 +177,21 @@ jobs:
             echo "any=1" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: astral-sh/setup-uv@v10.3.3
-        if: steps.collect.outputs.any == '1'
-
-      # PSR is release tooling, not a project dependency: run the pinned version
-      # through uvx on its own interpreter instead of adding it to the lockfile.
-      # Re-running this step for an existing tag fails on already-uploaded asset
-      # names; delete those assets first.
+      # `gh release upload` rather than `semantic-release publish`: publish
+      # resolves a release group from the *current branch*, and this job sits on
+      # a detached HEAD at the tag, which matches nothing - the step aborted with
+      # "Detached HEAD state cannot match any release groups" and exit 1,
+      # uploading nothing. The release already exists; attaching files is the
+      # whole job. --clobber keeps a re-run idempotent.
       - name: Upload binaries to the release
         if: steps.collect.outputs.any == '1'
-        run: uvx --python 3.12 --from "python-semantic-release==10.7.0" semantic-release -v publish --tag "$TAG"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.version.outputs.tag }}
+        run: gh release upload "$TAG" dist/* --clobber
 
-      # `publish` only warns when the release is missing, so a green run with an
-      # empty release page is possible without this check.
+      # A green upload step is not proof the assets are on the release page, so
+      # compare the count against what was downloaded.
       - name: Check the assets landed
         if: steps.collect.outputs.any == '1'
         env:

@@ -45,21 +45,37 @@ decrypted. **Plaintext is never written for a file that fails authentication.**
 ```
 offset  size         field
 0       8            magic        89 41 52 54 43 59 50 54  ("\x89ARTCYPT")
-8       16           salt         Argon2id salt
-24      16           master_iv    HKDF salt for the per-layer IVs
-40      n * 16       ciphertext   PKCS#7-padded plaintext, SM4-CBC -> Camellia-CBC -> AES-CBC
+8       4            version      big-endian uint32, currently 1
+12      8            length       big-endian uint64, bytes after this field
+20      16           salt         Argon2id salt
+36      16           master_iv    HKDF salt for the per-layer IVs
+52      n * 16       ciphertext   PKCS#7-padded plaintext, SM4-CBC -> Camellia-CBC -> AES-CBC
 -32     32           tag          KMAC256 over salt || master_iv || ciphertext
 ```
 
 `n = floor(len(plaintext) / 16) + 1`, so the ciphertext is always a multiple of 16 and
 always at least one block (an empty file encrypts to a single all-`0x10` padding block).
-Streaming uses 64 KiB chunks. The header is authenticated by the tag, but the magic number
-and the length are checked before Argon2id runs, so a wrong file or a truncated one is
-rejected cheaply.
+Streaming uses 64 KiB chunks.
 
-There is **no version byte**: files produced by the earlier CTR-based cascade are
-indistinguishable by magic and fail as "authentication failed" or "not block-aligned".
-Adding a version byte is the obvious fix if the format changes again.
+`length` covers `salt || master_iv || ciphertext || tag`, i.e. every byte after the field
+itself, and is therefore 80 for an empty file and 64 bytes larger than the ciphertext in
+general. It is written from the real byte count once the body is complete, so it always
+agrees with the file size even though encryption is a single streaming pass.
+
+The three cheapest checks run first, in this order, and each one bails out on its own:
+magic, version (only `1` is accepted), then `length` against the actual file size. All of
+them happen before Argon2id, before any crypto and before any output file is created, so a
+wrong file, a truncated file, a file with extra bytes, or a format from a future version
+costs milliseconds instead of 64 MiB and three passes. The salt and `master_iv` are
+authenticated by the tag; the version and length are not covered by it, but both are
+self-validating — only one version is accepted, and only one length matches a given file
+size — so tampering with either is rejected by the cheap checks.
+
+**Breaking change:** the version and length fields were added in format version 1. Files
+written by builds before that change have no version field, so their first four salt bytes
+are read as a version and they are rejected with `Unsupported format version …` rather
+than a misleading authentication failure. Decrypt them with an older build and re-encrypt
+with this one.
 
 ## Install
 
@@ -148,8 +164,9 @@ What is done deliberately:
 - Fresh salt and `master_iv` per encryption, so identical plaintexts never collide.
 - PKCS#7 is applied exactly once, before the first layer. Intermediate padding would leak
   length structure and grow the file at every layer.
-- The magic number, the minimum size and the block alignment are all checked before
-  Argon2id runs, so junk input costs milliseconds, not 64 MiB and three passes.
+- The magic, the version, the length and the block alignment are all checked before
+  Argon2id runs, in that order and each failing on its own, so junk input costs
+  milliseconds, not 64 MiB and three passes.
 
 What you should know:
 

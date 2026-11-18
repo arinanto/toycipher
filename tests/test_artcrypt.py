@@ -25,7 +25,7 @@ SALT = bytes(range(16))  # 00 01 02 ... 0f
 MASTER_IV = bytes(range(16, 32))  # 10 11 12 ... 1f
 PLAINTEXT = b"0123456789abcdef0123456789abcdef"  # 32 ASCII bytes
 
-HEADER_SIZE = len(A.MAGIC) + A.SALT_SIZE + A.IV_SIZE
+HEADER_SIZE = A.HEADER_SIZE
 
 # --- known answers, captured once and pinned here -------------------------
 # Argon2id(time_cost=3, memory_cost=65536, parallelism=4, hash_len=48) over PASSWORD/SALT.
@@ -40,10 +40,13 @@ KEY_MATERIAL = {
     "iv_camellia": "239d2eec3ac82ff78a8ed707eb8c1745",
     "iv_aes": "0a8678637f877cfb8b41aeadb86f72da",
 }
-# Whole encrypted file for PLAINTEXT: MAGIC || SALT || MASTER_IV || 48-byte
-# ciphertext (32 bytes plaintext + one PKCS#7 block) || 32-byte KMAC256 tag.
+# Whole encrypted file for PLAINTEXT: MAGIC || version(1) || length(0x70) || SALT ||
+# MASTER_IV || 48-byte ciphertext (32 bytes plaintext + one PKCS#7 block) || 32-byte
+# KMAC256 tag. The length counts salt+master_iv+ciphertext+tag = 112 = 0x70 bytes.
 FILE_VECTOR_32 = bytes.fromhex(
     "8941525443595054"  # MAGIC b"\x89ARTCYPT"
+    "00000001"  # version 1, big-endian
+    "0000000000000070"  # length 112, big-endian
     "000102030405060708090a0b0c0d0e0f"  # SALT
     "101112131415161718191a1b1c1d1e1f"  # MASTER_IV
     "296d27de966f2cd0b7c337e8ecf223e8"  # ciphertext block 1
@@ -53,8 +56,11 @@ FILE_VECTOR_32 = bytes.fromhex(
     "213df38c3f0410e0968d86079ff2ed69"
 )
 # Whole encrypted file for the empty plaintext (one all-0x10 padding block).
+# The length counts salt+master_iv+ciphertext+tag = 80 = 0x50 bytes.
 FILE_VECTOR_EMPTY = bytes.fromhex(
     "8941525443595054"
+    "00000001"
+    "0000000000000050"
     "000102030405060708090a0b0c0d0e0f"
     "101112131415161718191a1b1c1d1e1f"
     "5ed7a79fead379a8cddb4c91bd483f31"
@@ -66,6 +72,12 @@ FILE_VECTOR_EMPTY = bytes.fromhex(
 def padded_len(n: int) -> int:
     """Ciphertext length for an n-byte plaintext: PKCS#7 always adds 1..16 bytes."""
     return A.BLOCK_SIZE * (n // A.BLOCK_SIZE + 1)
+
+
+def with_length(body: bytes) -> bytes:
+    """A complete file: magic, version 1 and a length field that matches `body`."""
+    header = A.MAGIC + A.VERSION.to_bytes(A.VERSION_SIZE, "big") + len(body).to_bytes(A.LENGTH_SIZE, "big")
+    return header + body
 
 
 @dataclass
@@ -128,8 +140,11 @@ def test_empty_plaintext_known_answer(harness: Harness) -> None:
 def test_header_layout(harness: Harness) -> None:
     blob = harness.encrypt(PLAINTEXT, "layout")
     assert blob[: len(A.MAGIC)] == A.MAGIC
-    assert blob[len(A.MAGIC) : len(A.MAGIC) + A.SALT_SIZE] == SALT
-    assert blob[HEADER_SIZE - A.IV_SIZE : HEADER_SIZE] == MASTER_IV
+    assert blob[len(A.MAGIC) : A.LENGTH_OFFSET] == A.VERSION.to_bytes(A.VERSION_SIZE, "big")
+    length_field = int.from_bytes(blob[A.LENGTH_OFFSET : A.LENGTH_OFFSET + A.LENGTH_SIZE], "big")
+    assert length_field == len(blob) - A.BODY_OFFSET
+    assert blob[A.HEADER_SIZE - A.IV_SIZE - A.SALT_SIZE : A.HEADER_SIZE - A.IV_SIZE] == SALT
+    assert blob[A.HEADER_SIZE - A.IV_SIZE : A.HEADER_SIZE] == MASTER_IV
     assert len(blob) == HEADER_SIZE + padded_len(len(PLAINTEXT)) + A.TAG_SIZE
 
 
@@ -187,10 +202,73 @@ def test_bad_magic(harness: Harness) -> None:
     harness.rejects(b"\x00" + FILE_VECTOR_32[1:], "bad magic number")
 
 
-def test_too_small(harness: Harness) -> None:
-    harness.rejects(A.MAGIC + bytes(8), "too small")
+def test_old_format_without_version_field(harness: Harness) -> None:
+    # A pre-version file puts the salt right after the magic, so the version field
+    # reads a nonzero salt byte and is rejected cheaply instead of authenticating.
+    old_blob = FILE_VECTOR_32[: len(A.MAGIC)] + FILE_VECTOR_32[A.BODY_OFFSET :]
+    harness.rejects(old_blob, "Unsupported format version")
+
+
+@pytest.mark.parametrize("version", [0, 2, 3, 0xFFFFFFFF])
+def test_unsupported_version(harness: Harness, version: int) -> None:
+    blob = bytearray(FILE_VECTOR_32)
+    blob[len(A.MAGIC) : A.LENGTH_OFFSET] = version.to_bytes(A.VERSION_SIZE, "big")
+    harness.rejects(bytes(blob), f"Unsupported format version {version}")
+
+
+@pytest.mark.parametrize("delta", [-16, -1, 1, 16])
+def test_length_field_mismatch(harness: Harness, delta: int) -> None:
+    blob = bytearray(FILE_VECTOR_32)
+    claimed = len(blob) - A.BODY_OFFSET + delta
+    blob[A.LENGTH_OFFSET : A.LENGTH_OFFSET + A.LENGTH_SIZE] = claimed.to_bytes(A.LENGTH_SIZE, "big")
+    harness.rejects(bytes(blob), "length field does not match the file size")
+
+
+@pytest.mark.parametrize("cut", [1, A.TAG_SIZE, HEADER_SIZE])
+def test_truncated_file(harness: Harness, cut: int) -> None:
+    harness.rejects(FILE_VECTOR_32[:-cut], "length field does not match the file size")
+
+
+def test_trailing_byte(harness: Harness) -> None:
+    harness.rejects(FILE_VECTOR_32 + b"\x00", "length field does not match the file size")
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        A.MAGIC + bytes(3),  # version field cut short
+        A.MAGIC + A.VERSION.to_bytes(A.VERSION_SIZE, "big") + bytes(4),  # length field cut short
+    ],
+)
+def test_too_small(harness: Harness, blob: bytes) -> None:
+    harness.rejects(blob, "too small")
+
+
+def test_body_below_minimum(harness: Harness) -> None:
+    # Valid magic, version and a length that matches the file, but no ciphertext.
+    harness.rejects(with_length(SALT + MASTER_IV + FILE_VECTOR_32[-A.TAG_SIZE :]), "too small")
 
 
 def test_not_block_aligned(harness: Harness) -> None:
-    blob = FILE_VECTOR_32[:HEADER_SIZE] + bytes(17) + FILE_VECTOR_32[-A.TAG_SIZE :]
-    harness.rejects(blob, "block-aligned")
+    harness.rejects(with_length(SALT + MASTER_IV + bytes(17) + FILE_VECTOR_32[-A.TAG_SIZE :]), "block-aligned")
+
+
+def test_cheap_checks_never_reach_argon2id(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Magic, version and length must all bail before the 64 MiB Argon2id pass.
+    # The stub turns a short-circuit failure into a fast, explicit failure.
+    def unused_kdf(password: str, salt: bytes) -> bytes:
+        raise AssertionError("Argon2id ran despite a failed cheap check")
+
+    monkeypatch.setattr(A, "derive_master_key", unused_kdf)
+
+    bad_version = bytearray(FILE_VECTOR_32)
+    bad_version[len(A.MAGIC) : A.LENGTH_OFFSET] = (A.VERSION + 1).to_bytes(A.VERSION_SIZE, "big")
+    bad_length = bytearray(FILE_VECTOR_32)
+    bad_length[A.LENGTH_OFFSET : A.LENGTH_OFFSET + A.LENGTH_SIZE] = (1).to_bytes(A.LENGTH_SIZE, "big")
+
+    for blob, match in (
+        (b"\x00" + FILE_VECTOR_32[1:], "bad magic number"),
+        (bytes(bad_version), "Unsupported format version"),
+        (bytes(bad_length), "length field does not match"),
+    ):
+        harness.rejects(blob, match)

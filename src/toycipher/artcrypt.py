@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import struct
 import sys
 from typing import BinaryIO
 
@@ -14,14 +15,23 @@ from cryptography.hazmat.primitives import hashes, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-# On-disk layout: MAGIC(8) || salt(16) || master_iv(16) || ciphertext || tag(32)
-# ciphertext is PKCS#7-padded once, so its length is always a multiple of BLOCK_SIZE.
+# On-disk layout:
+#   MAGIC(8) || version(4) || length(8) || salt(16) || master_iv(16) || ciphertext || tag(32)
+# `length` is a big-endian uint64 counting every byte after the field itself, so it
+# covers salt, master_iv, ciphertext and tag. Ciphertext is PKCS#7-padded once, so its
+# length is always a multiple of BLOCK_SIZE.
 MAGIC = b"\x89ARTCYPT"  # 8-byte file signature, written first and checked first
+VERSION = 1  # format version; the only value this build writes and accepts
+VERSION_SIZE = 4  # big-endian uint32 version field
+LENGTH_SIZE = 8  # big-endian uint64 byte count of everything after this field
+LENGTH_OFFSET = len(MAGIC) + VERSION_SIZE  # start of the length field
+BODY_OFFSET = LENGTH_OFFSET + LENGTH_SIZE  # first byte the length field counts
 CHUNK_SIZE = 64 * 1024  # 64 KB streaming chunks (multiple of BLOCK_SIZE)
 BLOCK_SIZE = 16  # SM4, Camellia and AES all use 128-bit blocks
 SALT_SIZE = 16  # 128-bit Argon2id salt
 IV_SIZE = 16  # 128-bit Master IV
 TAG_SIZE = 32  # 256-bit KMAC256 authentication tag
+HEADER_SIZE = BODY_OFFSET + SALT_SIZE + IV_SIZE  # 52 bytes: ciphertext starts here
 EXT = ".artcrypt"
 
 
@@ -115,6 +125,8 @@ def encrypt_file(
 
     with open(input_path, "rb") as fin, open(output_path, "wb") as fout:
         fout.write(MAGIC)
+        fout.write(struct.pack(">I", VERSION))
+        fout.write(bytes(LENGTH_SIZE))  # placeholder, patched once the total is known
         fout.write(salt)
         fout.write(master_iv)
 
@@ -143,23 +155,43 @@ def encrypt_file(
 
         fout.write(mac.digest())
 
+        # The length counts everything after the field, so it is only known once the
+        # whole body is written. Patching it from the real byte count stays exact
+        # even if the input changed size mid-stream. The field is big-endian.
+        body_len = fout.tell() - BODY_OFFSET
+        fout.seek(LENGTH_OFFSET)
+        fout.write(struct.pack(">Q", body_len))
+
 
 def decrypt_file(input_path: str, output_path: str, password: str) -> None:
     """Verifies KMAC256 tag first, then decrypts in streaming chunks and strips padding."""
     file_size = os.path.getsize(input_path)
-    header_size = len(MAGIC) + SALT_SIZE + IV_SIZE
-    min_size = header_size + BLOCK_SIZE + TAG_SIZE  # at least one padded block
 
     with open(input_path, "rb") as fin:
-        # Cheapest possible rejection: bail out before Argon2id, before any crypto.
+        # Cheapest possible rejection, in order: signature, version, length. All three
+        # bail out before Argon2id, before any crypto, before any output is written.
         magic = fin.read(len(MAGIC))
         if magic != MAGIC:
             raise ValueError("Not an artcrypt file: bad magic number.")
 
-        if file_size < min_size:
+        raw_version = fin.read(VERSION_SIZE)
+        if len(raw_version) < VERSION_SIZE:
+            raise ValueError("File is too small or corrupted.")
+        if (version := struct.unpack(">I", raw_version)[0]) != VERSION:
+            raise ValueError(f"Unsupported format version {version}: this build reads version {VERSION} only.")
+
+        raw_length = fin.read(LENGTH_SIZE)
+        if len(raw_length) < LENGTH_SIZE:
+            raise ValueError("File is too small or corrupted.")
+        body_len = struct.unpack(">Q", raw_length)[0]
+        if body_len != file_size - BODY_OFFSET:
+            raise ValueError("File is truncated or corrupted: length field does not match the file size.")
+
+        min_body = SALT_SIZE + IV_SIZE + BLOCK_SIZE + TAG_SIZE  # at least one padded block
+        if body_len < min_body:
             raise ValueError("File is too small or corrupted.")
 
-        ciphertext_len = file_size - header_size - TAG_SIZE
+        ciphertext_len = body_len - SALT_SIZE - IV_SIZE - TAG_SIZE
         if ciphertext_len % BLOCK_SIZE:
             raise ValueError("File is truncated or corrupted: ciphertext is not block-aligned.")
 
@@ -187,7 +219,7 @@ def decrypt_file(input_path: str, output_path: str, password: str) -> None:
         except ValueError:
             raise ValueError("Authentication failed! Wrong password or tampered file.")
 
-        fin.seek(header_size)
+        fin.seek(HEADER_SIZE)
         dec_aes = Cipher(algorithms.AES(mat["k_aes"]), modes.CBC(mat["iv_aes"])).decryptor()
         dec_cam = Cipher(Camellia(mat["k_camellia"]), modes.CBC(mat["iv_camellia"])).decryptor()
         dec_sm4 = Cipher(algorithms.SM4(mat["k_sm4"]), modes.CBC(mat["iv_sm4"])).decryptor()

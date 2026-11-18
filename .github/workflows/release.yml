@@ -70,7 +70,9 @@ jobs:
     if: needs.version.outputs.released == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: true # a missing platform is a broken release, not a partial one
+      # One broken platform must not cost the other three their binary: every
+      # job runs to completion, and only the platforms that pass are published.
+      fail-fast: false
       matrix:
         include:
           # Current GA images. The runner's glibc does not leak into the artifact:
@@ -144,6 +146,9 @@ jobs:
   publish:
     name: attach binaries
     needs: [version, build]
+    # Runs even when a platform failed: whatever built and passed its smoke test
+    # still ships. Only a failed `version` job stops publishing.
+    if: ${{ !cancelled() && needs.version.result == 'success' && needs.version.outputs.released == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -151,18 +156,34 @@ jobs:
           ref: ${{ needs.version.outputs.tag }}
           fetch-depth: 0
 
+      # A run where every platform failed has no artifacts at all, which the
+      # action treats as an error rather than an empty download.
       - uses: actions/download-artifact@v8
+        continue-on-error: true
         with:
           path: dist
           merge-multiple: true
 
+      - name: Collect what was built
+        id: collect
+        run: |
+          ls -l dist 2>/dev/null || true
+          if [ -z "$(ls -A dist 2>/dev/null)" ]; then
+            echo "::warning::no platform produced a binary, publishing nothing"
+            echo "any=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=1" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: astral-sh/setup-uv@v10.3.3
+        if: steps.collect.outputs.any == '1'
 
       # PSR is release tooling, not a project dependency: run the pinned version
       # through uvx on its own interpreter instead of adding it to the lockfile.
       # Re-running this step for an existing tag fails on already-uploaded asset
       # names; delete those assets first.
       - name: Upload binaries to the release
+        if: steps.collect.outputs.any == '1'
         run: uvx --python 3.12 --from "python-semantic-release==10.7.0" semantic-release -v publish --tag "$TAG"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -171,11 +192,14 @@ jobs:
       # `publish` only warns when the release is missing, so a green run with an
       # empty release page is possible without this check.
       - name: Check the assets landed
+        if: steps.collect.outputs.any == '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           expected=$(ls -1 dist | wc -l)
-          gh release view "$TAG" --json assets --jq '.assets[].name' | sort
+          names=$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)
+          echo "$names"
           attached=$(gh release view "$TAG" --json assets --jq '.assets | length')
           [ "$attached" -eq "$expected" ] || { echo "::error::$attached of $expected assets attached to $TAG"; exit 1; }
+          { echo "### $TAG"; echo '```'; echo "$names"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

@@ -122,6 +122,11 @@ There is no `windows-aarch64` build: `cryptography` publishes no `win_arm64` whe
 dependency cannot be installed on the ARM runner. Add the commented-out matrix entry back
 when a wheel ships.
 
+A platform whose build or smoke test fails does not hold up the others: every platform is
+built independently and only the ones that pass are attached, so a release can carry a
+subset of the table above. The workflow run still goes red, and the job summary lists what
+actually made it onto the release page.
+
 To turn the newest prerelease into a final release, run the `release` workflow manually
 (*Actions → release → Run workflow*) with `kind: ga`. It finalises `v0.2.0-rc.2` as
 `v0.2.0` rather than starting another `rc`, and the GitHub release is marked as a normal

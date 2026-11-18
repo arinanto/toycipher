@@ -93,7 +93,9 @@ jobs:
           ref: ${{ needs.version.outputs.tag }}
           fetch-depth: 1
 
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv stopped publishing moving major tags after v7, so `@v10` does
+      # not resolve; pin the exact release.
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
 
@@ -143,7 +145,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
 
       # PSR is release tooling, not a project dependency: run the pinned version
       # through uvx on its own interpreter instead of adding it to the lockfile.

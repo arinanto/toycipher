@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.1.0-rc.5 (2026-11-18)
+
+### Bug Fixes
+
+- **ci**: Let a manual dispatch force a version level
+  ([`995c614`](https://github.com/arinanto/toycipher/commit/995c61414ca7043e85fa1bab6659e2a414f4a3ac))
+
+
 ## v0.1.0-rc.4 (2026-11-18)
 
 ### Bug Fixes

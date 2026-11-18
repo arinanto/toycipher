@@ -3,7 +3,7 @@
 
 [project]
 name = "toycipher"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 description = "Streaming file encryption with a three-cipher SM4/Camellia/AES-CBC cascade and a KMAC256 authentication tag"
 readme = "README.md"
 requires-python = ">=3.15"

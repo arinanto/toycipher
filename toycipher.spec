@@ -5,19 +5,28 @@
 import sys
 from pathlib import Path
 
-# PyInstaller 6.22 does not bundle the abi3t-compat stub (pyinstaller#9562).
-# On Windows, cryptography and argon2-cffi-bindings ship a single cp315 wheel
-# tagged "abi3.abi3t" - PEP 803's shared wheel for the GIL and free-threaded
-# builds - and its .pyd files import python3t.dll. A GIL CPython 3.15 install
-# lays that stub down next to python315.dll; it only forwards exports to
-# python315.dll, so shipping it costs 60 KB and nothing else. Without it the
-# frozen exe dies on `import cryptography` with "DLL load failed while
-# importing _ffi". Drop this block once PyInstaller bundles the stub itself.
+# PyInstaller does not bundle the abi3t-compat stub as of 6.22.3
+# (pyinstaller#9562). On Windows, cryptography and argon2-cffi-bindings ship a
+# single cp315 wheel tagged "abi3.abi3t" - PEP 803's shared wheel for the GIL
+# and free-threaded builds - and its .pyd files import python3t.dll. The stub
+# only forwards exports to python315.dll, so shipping it costs 60 KB and
+# nothing else. Without it the frozen exe dies on `import cryptography` with
+# "DLL load failed while importing _ffi".
+#
+# A GIL-enabled CPython 3.15 does not put it next to python315.dll: both the
+# python.org installer and the GitHub Actions toolcache keep it in an
+# abi3t-compat/ subdirectory, out of the loader's default search path, which is
+# the same reason PyInstaller cannot find it. The free-threaded build does lay
+# it down at the install root. Drop this block once PyInstaller ships the fix
+# (changelogged for the release after 6.22.3).
 binaries = []
 if sys.platform == "win32":
-    abi3t_stub = Path(sys.base_prefix) / "python3t.dll"
-    if not abi3t_stub.is_file():
-        raise SystemExit(f"{abi3t_stub} is missing: the abi3t wheels would not load")
+    base = Path(sys.base_prefix)
+    abi3t_stubs = [base / "abi3t-compat" / "python3t.dll", base / "python3t.dll"]
+    abi3t_stub = next((stub for stub in abi3t_stubs if stub.is_file()), None)
+    if abi3t_stub is None:
+        checked = ", ".join(map(str, abi3t_stubs))
+        raise SystemExit(f"no python3t.dll in {checked}: the abi3t wheels would not load")
     binaries.append((str(abi3t_stub), "."))
 
 

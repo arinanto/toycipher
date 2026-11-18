@@ -25,6 +25,11 @@ on:
         type: choice
         options: [prerelease, ga]
         default: prerelease
+      force:
+        description: "cut a version even when no commit calls for one; 'none' lets PSR decide"
+        type: choice
+        options: [none, prerelease, patch, minor, major]
+        default: none
 
 permissions:
   contents: write
@@ -62,6 +67,13 @@ jobs:
           git_committer_email: 41898282+github-actions[bot]@users.noreply.github.com
           # push and dispatch(kind=prerelease) -> rc; dispatch(kind=ga) -> final
           prerelease: ${{ github.event_name == 'push' || inputs.kind == 'prerelease' }}
+          # A dispatch may force a version level when nothing release-worthy has
+          # landed - the way out of a version job that died after bumping
+          # pyproject.toml but before pushing the tag, since re-running that job
+          # would find nothing left to release. 'none' and a push event both map
+          # to an empty input, which the action ignores. The levels are the
+          # action's `force` input, which forwards as --prerelease/--patch/...
+          force: ${{ inputs.force != 'none' && inputs.force || '' }}
           build: false # the binaries are built per platform in the next job
 
   build:
